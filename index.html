@@ -1,0 +1,1176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>末日捡垃圾</title>
+    <style>
+        body {
+            color: #d0d0d0;
+            font-family: sans-serif;
+            padding: 20px;
+            max-width: 400px;
+            margin: 0 auto;
+            line-height: 1.8;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="overlay" style="opacity:0;"></div>
+    <div id="game">
+        <div id="timeBar"></div>
+        <div id="statusBar"></div>
+        <div id="inventoryBar"></div>
+        <div id="sceneArea">
+            <p>你从一场噩梦中醒来。</p>
+            <p>空气里弥漫着灰尘的味道。窗帘半拉着，外面灰蒙蒙的光透进来。</p>
+            <p>你记得自己昨晚入住了这家酒店，本来只是在这座城市短暂旅行，但现在一切都安静得不对劲。</p>
+            <p>你起身走到窗边，拉开窗帘——远处的建筑有几栋已经坍塌，黑烟从地平线上升起。</p>
+            <p>街道上空无一人。</p>
+            <p><span class="action" onclick="startGame()">【开始探索】</span></p>
+        </div>
+    </div>
+
+    <script src="items.js"></script>
+    <script src="places.js"></script>
+
+    <script>
+        // 主角数据
+        let player = {
+            bodyAbility: 3,    // 身体能力
+            searchAbility: 2,  // 搜索能力
+            fullness: 100,   // 饱腹值
+            energy: 100,     // 体力值
+            spirit: 100,     // 精神值
+            inventory: []     // 背包
+        };
+        let sleepHours = 8;  // 睡眠时长变量，放在全局
+
+        let gameTime = {
+            year: 1,
+            season: 'spring',  // 春季
+            day: 1,
+            hour: 8
+        };
+
+        // 当前季节的时间配置
+        let seasonConfig = {
+            dawn: 6,      // 天亮时间
+            dusk: 18,     // 天黑时间
+            duskStart: 18,  // 蒙版开始时间
+            duskEnd: 20,    // 蒙版结束（全黑）
+            dawnStart: 4,   // 蒙版开始（从全黑）
+            dawnEnd: 6      // 蒙版结束（全亮）
+        };
+
+        // 运行时数据
+        let world = {
+            cities: {}  // { 城市实例编号: { cityTypeId, bigPlaceInstances: [] } }
+        };
+
+        let cityConnections = [];  // { fromCityInstanceId, fromSubInstanceId, toCityInstanceId, toSubInstanceId, travelHours }
+
+        let bigPlaceInstances = {};   // { 大场所实例编号: { bigPlaceTypeId, subPlaceInstances: [] } }
+        let subPlaceInstances = {};   // { 小场所实例编号: { subPlaceTypeId, locked, searched } }
+
+        let instanceCounters = {
+            city: 0,
+            bigPlace: 0,
+            subPlace: 0
+        };
+
+        // 当前所在位置
+        let currentCityId = null;
+        let currentBigPlaceId = null;
+        let currentSubPlaceId = null;
+
+        //背包打开状态
+        window.inventoryCollapsed = false;
+        window.selectedItemId = null;
+        window.inventoryActionVisible = false;
+
+        //大小场所开锁目标
+        window.unlockTarget = null;
+
+        //安顿目标（小场所）
+        window.settleTarget = null;
+
+
+
+
+        //按分钟推进时间
+        function advanceTime(hours) {
+            // 转为分钟计算
+            let totalMinutes = gameTime.hour * 60 + hours * 60;
+            totalMinutes = Math.round(totalMinutes); // 避免浮点误差
+            while (totalMinutes >= 1440) {
+                totalMinutes -= 1440;
+                gameTime.day += 1;
+            }
+            gameTime.hour = totalMinutes / 60;
+
+            player.fullness = Math.max(0, player.fullness - hours * 3);
+            player.spirit = Math.max(0, player.spirit - hours * 2);
+        }
+
+        //夜幕蒙版
+        function updateOverlay() {
+            let overlay = document.getElementById('overlay');
+            let hour = gameTime.hour;
+            let opacity = 0;
+
+            if (hour >= seasonConfig.duskEnd || hour < seasonConfig.dawnStart) {
+                // 黑：20:00 - 4:00
+                opacity = 0.8;
+            } else if (hour >= seasonConfig.duskStart && hour < seasonConfig.duskEnd) {
+                // 傍晚过渡：18:00 - 20:00，从0到1
+                opacity = 0.8 * (hour - seasonConfig.duskStart) / (seasonConfig.duskEnd - seasonConfig.duskStart);
+            } else if (hour >= seasonConfig.dawnStart && hour < seasonConfig.dawnEnd) {
+                // 清晨过渡：4:00 - 6:00，从1到0
+                opacity = 0.8 * (1 - (hour - seasonConfig.dawnStart) / (seasonConfig.dawnEnd - seasonConfig.dawnStart));
+            } else {
+                // 白天：6:00 - 18:00
+                opacity = 0;
+            }
+
+            overlay.style.opacity = opacity;
+        }
+
+        //渐变效果
+        function fadeContent(elementId, newInnerHTML) {
+            let el = document.getElementById(elementId);
+            if (newInnerHTML !== undefined) {
+                el.innerHTML = newInnerHTML;
+            }
+            el.style.opacity = '0.3';
+            setTimeout(() => {
+                el.style.opacity = '1';
+            }, 100);
+        }
+
+        //状态栏显示，背包，时间，状态
+
+        function renderTimeBar() {
+            let displayHour = Math.floor(gameTime.hour);
+            let displayMinute = Math.round((gameTime.hour - displayHour) * 60);
+            if (displayMinute === 60) {
+                displayHour += 1;
+                displayMinute = 0;
+            }
+            let timeStr = String(displayHour).padStart(2, '0') + ':' + String(displayMinute).padStart(2, '0');
+            let timeHtml = `春季 第${gameTime.day}天 ${timeStr}`;
+
+            let locationHtml = '';
+            if (currentCityId) {
+                let city = world.cities[currentCityId];
+                let cityName = city.name;
+                locationHtml = cityName;
+                if (currentBigPlaceId) {
+                    let bigPlaceName = BIG_PLACE_TYPES[bigPlaceInstances[currentBigPlaceId].bigPlaceTypeId].name;
+                    locationHtml += ` · ${bigPlaceName}`;
+                    if (currentSubPlaceId) {
+                        let subName = SUB_PLACE_TYPES[subPlaceInstances[currentSubPlaceId].subPlaceTypeId].name;
+                        locationHtml += ` · ${subName}`;
+                    }
+                }
+            }
+
+            let html = `<span style="float:left;">${timeHtml}</span>`;
+            if (locationHtml) {
+                html += `<span style="float:right;">${locationHtml}</span>`;
+            }
+            html += `<div style="clear:both;"></div>`;
+            document.getElementById('timeBar').innerHTML = html;
+        }
+
+        function renderStatusBar() {
+
+            let fullness = Math.round(player.fullness);
+            let energy = Math.round(player.energy);
+            let spirit = Math.round(player.spirit);
+            let html = `饱腹：<span class="stat-value" id="stat-fullness" style="color:${getStatusColor(fullness)}">${fullness}</span> | 体力：<span class="stat-value" id="stat-energy" style="color:${getStatusColor(energy)}">${energy}</span> | 精神：<span class="stat-value" id="stat-spirit" style="color:${getStatusColor(spirit)}">${spirit}</span>`;
+
+            document.getElementById('statusBar').innerHTML = html;
+
+            // 检查哪些值变了，触发淡入
+            ['fullness', 'energy', 'spirit'].forEach(stat => {
+                let newVal = Math.round(player[stat]);
+                if (window._lastStatusValues && window._lastStatusValues[stat] !== undefined && window._lastStatusValues[stat] !== newVal) {
+                    let el = document.getElementById('stat-' + stat);
+                    if (el) {
+                        el.style.transition = 'none';
+                        el.style.opacity = '0.5';
+                        setTimeout(() => {
+                            el.style.transition = 'opacity 0.3s';
+                            el.style.opacity = '1';
+                        }, 100);
+                    }
+                }
+            });
+
+            window._lastStatusValues = { fullness, energy, spirit };
+        }
+
+
+        function renderInventoryBar() {
+            let html = `<span style="cursor:pointer;" onclick="toggleInventory()">背包 ${window.inventoryCollapsed ? '[展开]' : '[折叠]'}</span>`;
+            if (!window.inventoryCollapsed) {
+                if (player.inventory.length === 0) {
+                    html += '<br>空';
+                } else {
+                    let items = player.inventory.map(item => {
+                        return `<br><span style="color:#fff;font-weight:bold;">${item.qty}</span><span style="color:#aaa;text-decoration:underline;cursor:pointer;" onclick="event.stopPropagation();selectItem('${item.id}')"> × ${item.name}</span>`;
+                    });
+                    html += items.join('');
+                }
+                if (window.selectedItemId && window.inventoryActionVisible) {
+                    let selectedItem = player.inventory.find(i => i.id === window.selectedItemId);
+                    if (selectedItem) {
+                        html += `<br>使用 <span style="color:#fff;font-weight:bold;">${selectedItem.name}</span>？ `;
+                        html += `<span class="action" onclick="useItem('${selectedItem.id}')">[使用]</span> `;
+                        html += `<span class="action" onclick="cancelItemAction()">[取消]</span>`;
+                    }
+                }
+            }
+            document.getElementById('inventoryBar').innerHTML = html;
+        }
+
+        //状态字体颜色
+        function getStatusColor(value) {
+            if (value > 75) return '#66cc66';        // 绿色
+            if (value > 50) return '#99cc33';        // 黄绿色
+            if (value > 25) return '#ccaa33';        // 黄色
+            return '#cc3333';                         // 红色
+        }
+
+        //背包折叠
+        function toggleInventory() {
+            window.inventoryCollapsed = !window.inventoryCollapsed;
+            window.selectedItemId = null;
+            window.inventoryActionVisible = false;
+            renderInventoryBar();
+        }
+
+        //背包物品选择
+        function selectItem(itemId) {
+            if (window.selectedItemId === itemId && window.inventoryActionVisible) {
+                window.selectedItemId = null;
+                window.inventoryActionVisible = false;
+            } else {
+                window.selectedItemId = itemId;
+                window.inventoryActionVisible = true;
+            }
+            renderInventoryBar();
+        }
+
+        //背包物品选择取消
+        function cancelItemAction() {
+            window.selectedItemId = null;
+            window.inventoryActionVisible = false;
+            renderInventoryBar();
+        }
+
+        //使用道具
+        function useItem(itemId) {
+            let item = getItemById(itemId);
+            let invItem = player.inventory.find(i => i.id === itemId);
+            if (!invItem) return;
+
+            // 扣除体力和时间
+            player.energy -= 3;
+            advanceTime(0.5);
+
+
+            // 应用效果
+            // let msgParts = [];
+            // let beforeFullness = Math.round(player.fullness);
+            // let beforeEnergy = Math.round(player.energy);
+            // let beforeSpirit = Math.round(player.spirit);
+
+            player.fullness = Math.min(100, player.fullness + item.effect[0]);
+            player.energy = Math.min(100, player.energy + item.effect[1]);
+            player.spirit = Math.min(100, player.spirit + item.effect[2]);
+
+            player.fullness = Math.round(player.fullness);
+            player.energy = Math.round(player.energy);
+            player.spirit = Math.round(player.spirit);
+
+            // let fullnessGain = player.fullness - beforeFullness;
+            // let energyGain = player.energy - beforeEnergy;
+            // let spiritGain = player.spirit - beforeSpirit;
+
+            // if (fullnessGain > 0) msgParts.push(`饱腹+${fullnessGain}`);
+            // if (energyGain > 0) msgParts.push(`体力+${energyGain}`);
+            // if (spiritGain > 0) msgParts.push(`精神+${spiritGain}`);
+
+
+
+            // 减少数量
+            invItem.qty -= 1;
+            if (invItem.qty <= 0) {
+                player.inventory = player.inventory.filter(i => i.id !== itemId);
+            }
+
+            // 清除选中状态并刷新
+            window.selectedItemId = null;
+            window.inventoryActionVisible = false;
+
+            renderInventoryBar();
+            renderStatusBar();
+            renderTimeBar();
+
+            //目前删掉的效果解释，保持背包界面操作轻量
+            // let resultHtml = `<p>你使用了${item.name}。</p>`;
+            // if (msgParts.length > 0) {
+            //     resultHtml += `<p>${msgParts.join('，')}</p>`;
+            // }
+            // document.getElementById('sceneArea').innerHTML = resultHtml;
+        }
+
+
+        //安顿窗口
+        function toggleSettle(subInstanceId) {
+            // 消耗时间和体力
+            player.energy -= 5;
+            advanceTime(0.5);
+            renderTimeBar();
+            renderStatusBar();
+
+            window.settleTarget = subInstanceId;
+
+            let html = '<p>你安顿下来，准备休整一番。</p>';
+            html += `<p><span class="action" onclick="sleepHere('${subInstanceId}')">【睡觉】</span></p>`;
+            html += `<p><span class="action" onclick="eatHere()">【吃饭】</span></p>`;
+            html += `<p><span class="action" style="color:#888;" onclick="closeSettle('${subInstanceId}')">【再次启程】</span></p>`;
+
+            fadeContent('sceneArea', html);
+            updateOverlay();
+        }
+
+        //关闭安顿窗口
+        function closeSettle(subInstanceId) {
+            window.settleTarget = null;
+            enterSubPlace(subInstanceId, SUB_PLACE_TYPES[subPlaceInstances[subInstanceId].subPlaceTypeId].name);
+        }
+
+        //刷新安顿
+        function showSettle(subInstanceId) {
+            window.settleTarget = subInstanceId;
+            let html = '<p>你安顿下来，准备休整一番。</p>';
+            html += `<p><span class="action" onclick="sleepHere('${subInstanceId}')">【睡觉】</span></p>`;
+            html += `<p><span class="action" onclick="eatHere()">【吃饭】</span></p>`;
+            html += `<p><span class="action" style="color:#888;" onclick="closeSettle('${subInstanceId}')">【再次启程】</span></p>`;
+            fadeContent('sceneArea', html);
+        }
+
+
+
+
+
+
+        //安顿-睡觉
+        function sleepHere(subInstanceId) {
+            let subInstance = subPlaceInstances[subInstanceId];
+            let subType = SUB_PLACE_TYPES[subInstance.subPlaceTypeId];
+            let comfort = subType.comfort || 30;
+
+            let beforeEnergy = Math.round(player.energy);
+            let beforeSpirit = Math.round(player.spirit);
+
+            advanceTime(sleepHours);
+            player.energy = Math.min(100, player.energy + comfort);
+
+            // 精神值变化
+            let nightmareRoll = Math.random();
+            let spiritMsg = '';
+            if (nightmareRoll < 0.3) {
+                // 30% 概率做噩梦，重置为较低值
+                player.spirit = Math.max(player.spirit, 30);  // 如果当前高于30则降到30，低于30则不变
+                spiritMsg = '你做了一场噩梦，精神受到冲击。';
+            } else {
+                // 85% 概率恢复精神
+                let spiritRecovery = Math.floor(comfort * 0.6);
+                player.spirit = Math.min(100, player.spirit + spiritRecovery);
+            }
+
+            player.energy = Math.round(player.energy);
+            player.spirit = Math.round(player.spirit);
+
+            let energyGain = player.energy - beforeEnergy;
+            let spiritGain = player.spirit - beforeSpirit;
+
+
+            renderTimeBar();
+            renderStatusBar();
+            renderInventoryBar();
+
+
+            let html = `<p>你睡了${sleepHours}小时，恢复了${energyGain}点体力。</p>`;
+            if (spiritMsg) {
+                html += `<p>${spiritMsg}</p>`;
+            } else if (spiritGain > 0) {
+                html += `<p>精神恢复了${spiritGain}点。</p>`;
+            }
+            html += `<p><span class="action" onclick="showSettle('${subInstanceId}')">【继续】</span></p>`;
+
+
+
+            fadeContent('sceneArea', html);
+            updateOverlay();
+        }
+
+        //安顿-吃饭
+        function eatHere() {
+            let foodItems = player.inventory.filter(i => getItemById(i.id).category === 'food');
+
+            if (foodItems.length === 0) {
+                let html = '<p>没有食物。</p>';
+                html += `<p><span class="action" style="color:#888;" onclick="showSettle('${window.settleTarget}')">[返回]</span></p>`;
+                fadeContent('sceneArea', html);
+                return;
+            }
+
+            let html = '<p>选择食物：</p>';
+            for (let item of foodItems) {
+                html += `<p><span class="action" onclick="eatFood('${item.id}')">[${item.name}]</span></p>`;
+            }
+            html += `<p><span class="action" style="color:#888;" onclick="showSettle('${window.settleTarget}')">[返回]</span></p>`;
+            fadeContent('sceneArea', html);
+
+        }
+
+        //安顿-吃饭-吃食物
+        function eatFood(itemId) {
+            let item = getItemById(itemId);
+            let invItem = player.inventory.find(i => i.id === itemId);
+            if (!invItem) return;
+
+            let beforeFullness = Math.round(player.fullness);
+            let beforeEnergy = Math.round(player.energy);
+            let beforeSpirit = Math.round(player.spirit);
+
+            let fullnessBonus = Math.floor((item.effect[0] || 0) * 1.5);
+            let energyBonus = Math.floor((item.effect[1] || 0) * 1.5);
+            let spiritBonus = Math.floor((item.effect[2] || 0) * 1.5);
+
+            advanceTime(0.5);
+            player.energy -= 3;
+            player.fullness = Math.min(100, player.fullness + fullnessBonus);
+            player.energy = Math.min(100, player.energy + energyBonus);
+            player.spirit = Math.min(100, player.spirit + spiritBonus);
+
+            player.fullness = Math.round(player.fullness);
+            player.energy = Math.round(player.energy);
+            player.spirit = Math.round(player.spirit);
+
+            let msgParts = [];
+            let fullnessGain = player.fullness - beforeFullness;
+            let energyGain = player.energy - beforeEnergy;
+            let spiritGain = player.spirit - beforeSpirit;
+            if (fullnessGain > 0) msgParts.push(`饱腹+${fullnessGain}`);
+            if (energyGain > 0) msgParts.push(`体力+${energyGain}`);
+            if (spiritGain > 0) msgParts.push(`精神+${spiritGain}`);
+
+            invItem.qty -= 1;
+            if (invItem.qty <= 0) {
+                player.inventory = player.inventory.filter(i => i.id !== itemId);
+            }
+
+            renderTimeBar();
+            renderStatusBar();
+            renderInventoryBar();
+
+            let resultHtml = `<p>你吃下了${item.name}。</p>`;
+            if (msgParts.length > 0) {
+                resultHtml += `<p>${msgParts.join('，')}</p>`;
+            }
+            resultHtml += `<p><span class="action" style="color:#888;" onclick="showSettle(window.settleTarget)">[返回]</span></p>`;
+            fadeContent('sceneArea', html);
+            updateOverlay();
+        }
+
+
+
+        //开始游戏，在酒店醒来
+        function startGame() {
+
+            // 重置数据
+            world = { cities: {} };
+            bigPlaceInstances = {};
+            subPlaceInstances = {};
+            instanceCounters = { city: 0, bigPlace: 0, subPlace: 0 };
+            player.inventory = [];
+            player.fullness = 100;
+            player.energy = 100;
+            player.spirit = 50;
+
+
+            // 生成城市
+            let cityInstanceId = generateCity('C0001');
+            currentCityId = cityInstanceId;
+
+            // 找到酒店实例并设为已知、生成内部
+            let city = world.cities[cityInstanceId];
+            let hotelInstanceId = null;
+            for (let bpId of city.bigPlaceInstances) {
+                if (bigPlaceInstances[bpId].bigPlaceTypeId === 'B0001') {
+                    hotelInstanceId = bpId;
+                    break;
+                }
+            }
+
+            // 如果城市配置中酒店概率不是1.0导致没生成，强制生成一个
+            if (!hotelInstanceId) {
+                instanceCounters.bigPlace++;
+                hotelInstanceId = 'BP' + instanceCounters.bigPlace;
+                bigPlaceInstances[hotelInstanceId] = {
+                    bigPlaceTypeId: 'B0001',
+                    known: true,
+                    visited: true,
+                    locked: false,
+                    subPlaceInstances: []
+                };
+                city.bigPlaceInstances.push(hotelInstanceId);
+            }
+
+            bigPlaceInstances[hotelInstanceId].known = true;
+            generateBigPlace('B0001', cityInstanceId, hotelInstanceId);
+            currentBigPlaceId = hotelInstanceId;
+
+            showBigPlace(hotelInstanceId);
+
+            updateOverlay();
+        }
+
+        //生成城市实例，生成内部大场所外壳
+        function generateCity(cityTypeId) {
+            let cityType = CITY_TYPES[cityTypeId];
+
+            instanceCounters.city++;
+            let cityInstanceId = 'CT' + instanceCounters.city;
+
+            let bigPlaceInstanceIds = [];
+
+            for (let entry of cityType.bigPlaces) {
+                if (Math.random() < entry.probability) {
+                    let qty = Math.floor(Math.random() * (entry.maxQty - entry.minQty + 1)) + entry.minQty;
+                    for (let i = 0; i < qty; i++) {
+                        instanceCounters.bigPlace++;
+                        let bigPlaceInstanceId = 'BP' + instanceCounters.bigPlace;
+
+                        let locked = false;
+                        // 住宅类型上锁概率更高
+                        if (entry.bigPlaceTypeId === 'B0005') {
+                            locked = Math.random() < 0.7;
+                        }
+
+                        bigPlaceInstances[bigPlaceInstanceId] = {
+                            bigPlaceTypeId: entry.bigPlaceTypeId,
+                            known: false,
+                            locked: locked,
+                            subPlaceInstances: []
+                        };
+
+                        bigPlaceInstanceIds.push(bigPlaceInstanceId);
+                    }
+                }
+            }
+
+            world.cities[cityInstanceId] = {
+                cityTypeId: cityTypeId,
+                name: generateCityName(),
+                visited: false,
+                bigPlaceInstances: bigPlaceInstanceIds
+            };
+
+            return cityInstanceId;
+        }
+
+        //生成大场所实例，生成内部小场所外壳
+        function generateBigPlace(bigPlaceTypeId, cityInstanceId, existingInstanceId) {
+            let type = BIG_PLACE_TYPES[bigPlaceTypeId];
+
+            // 生成大场所实例
+            let bigPlaceInstanceId;
+            if (existingInstanceId) {
+                bigPlaceInstanceId = existingInstanceId;
+            } else {
+                instanceCounters.bigPlace++;
+                bigPlaceInstanceId = 'BP' + instanceCounters.bigPlace;
+            }
+
+            let locked = Math.random() < 0.3;  // 30%概率上锁，后续可改为大场所类型自身属性
+
+            // 如果实例已存在，更新它；否则新建
+            if (!bigPlaceInstances[bigPlaceInstanceId]) {
+                bigPlaceInstances[bigPlaceInstanceId] = {
+                    bigPlaceTypeId: bigPlaceTypeId,
+                    known: true,
+                    visited: false,
+                    locked: false,
+                    subPlaceInstances: []
+                };
+            }
+
+            bigPlaceInstances[bigPlaceInstanceId].subPlaceInstances = [];
+
+            // 根据类型配置生成小场所实例
+            for (let entry of type.subPlaces) {
+                if (Math.random() < entry.probability) {
+                    let qty = Math.floor(Math.random() * (entry.maxQty - entry.minQty + 1)) + entry.minQty;
+                    for (let i = 0; i < qty; i++) {
+                        instanceCounters.subPlace++;
+                        let subInstanceId = 'SP' + instanceCounters.subPlace;
+
+                        //暂时设置小场所上锁概率0.4，道路永远不上锁
+                        let locked = entry.subPlaceId === 'P0010' ? false : Math.random() < 0.4;
+
+                        subPlaceInstances[subInstanceId] = {
+                            subPlaceTypeId: entry.subPlaceId,
+                            locked: locked,
+                            searched: false
+                        };
+
+                        // 如果是道路类型，分配目的地
+                        if (entry.subPlaceId === 'P0010') {
+                            // 先生成目标城市
+                            let cityTypeIds = Object.keys(CITY_TYPES);
+                            let randomCityTypeId = cityTypeIds[Math.floor(Math.random() * cityTypeIds.length)];
+                            let destCityInstanceId = generateCity(randomCityTypeId);
+
+                            let travelHours = Math.floor(Math.random() * 3) + 8;
+                            subPlaceInstances[subInstanceId].destination = {
+                                cityTypeId: randomCityTypeId,
+                                cityInstanceId: destCityInstanceId,
+                                travelHours: travelHours
+                            };
+                        }
+
+                        bigPlaceInstances[bigPlaceInstanceId].subPlaceInstances.push(subInstanceId);
+                    }
+                }
+            }
+
+            // 将大场所实例加入城市
+            if (!world.cities[cityInstanceId]) {
+                world.cities[cityInstanceId] = { cityTypeId: null, bigPlaceInstances: [] };
+            }
+            if (!world.cities[cityInstanceId].bigPlaceInstances.includes(bigPlaceInstanceId)) {
+                world.cities[cityInstanceId].bigPlaceInstances.push(bigPlaceInstanceId);
+            }
+
+            return bigPlaceInstanceId;
+        }
+
+
+        //点击大场所
+        function clickBigPlace(bpId) {
+            let bp = bigPlaceInstances[bpId];
+
+            if (bp.locked) {
+                if (window.unlockTarget === bpId) {
+                    window.unlockTarget = null;
+                } else {
+                    window.unlockTarget = bpId;
+                }
+                leaveBigPlace();
+                return;
+            }
+
+            window.unlockTarget = null;
+            showBigPlace(bpId);
+        }
+
+        //开锁大场所
+        function unlockBigPlace(bpId) {
+            let keyIndex = player.inventory.findIndex(item => item.id === 'I0009');
+            if (keyIndex === -1) return;
+
+            bigPlaceInstances[bpId].locked = false;
+            player.inventory[keyIndex].qty -= 1;
+            if (player.inventory[keyIndex].qty <= 0) {
+                player.inventory.splice(keyIndex, 1);
+            }
+            window.unlockTarget = null;
+            renderInventoryBar();
+            leaveBigPlace();
+        }
+
+        //取消开锁大场所
+        function cancelBigPlaceAction() {
+            window.unlockTarget = null;
+            leaveBigPlace();
+        }
+
+
+
+        //显示【大场所】，刷新内部小场所状态
+        function showBigPlace(bigPlaceInstanceId) {
+            currentBigPlaceId = bigPlaceInstanceId;
+
+            let bigPlace = bigPlaceInstances[bigPlaceInstanceId];
+            if (bigPlace.subPlaceInstances.length === 0) {
+                generateBigPlace(bigPlace.bigPlaceTypeId, currentCityId, bigPlaceInstanceId);
+                bigPlace = bigPlaceInstances[bigPlaceInstanceId];
+            }
+
+            //标记当前大场所+城市都是已去过
+            bigPlaceInstances[bigPlaceInstanceId].visited = true;
+            let city = world.cities[currentCityId];
+            if (city && !city.visited) {
+                city.visited = true;
+            }
+
+
+            currentSubPlaceId = null;
+            let bigPlaceType = BIG_PLACE_TYPES[bigPlace.bigPlaceTypeId];
+
+
+            renderTimeBar();
+            renderStatusBar();
+            renderInventoryBar();
+            let html = `<p>你在${bigPlaceType.name}里。</p>`;
+
+
+            // 检查并揭示新场所
+            let unknownPlaces = city.bigPlaceInstances.filter(bpId => {
+                return !bigPlaceInstances[bpId].known && bpId !== bigPlaceInstanceId;
+            });
+
+            if (unknownPlaces.length > 0) {
+                let revealCount = Math.min(Math.floor(Math.random() * 2) + 1, unknownPlaces.length);
+                let revealed = [];
+                for (let i = 0; i < revealCount; i++) {
+                    let randomIndex = Math.floor(Math.random() * unknownPlaces.length);
+                    let revealedId = unknownPlaces.splice(randomIndex, 1)[0];
+                    bigPlaceInstances[revealedId].known = true;
+                    let bpType = BIG_PLACE_TYPES[bigPlaceInstances[revealedId].bigPlaceTypeId];
+                    revealed.push(bpType.name);
+                }
+                html += `<p style="color:#c4a35a;">你向远处望去，发现了：${revealed.join('、')}。</p>`;
+            }
+
+            //小场所
+
+            for (let i = 0; i < bigPlace.subPlaceInstances.length; i++) {
+                let subInstanceId = bigPlace.subPlaceInstances[i];
+                let subInstance = subPlaceInstances[subInstanceId];
+                let subType = SUB_PLACE_TYPES[subInstance.subPlaceTypeId];
+
+
+
+                let displayName = subType.name;
+                let sameCount = 0;
+                for (let j = 0; j <= i; j++) {
+                    if (subPlaceInstances[bigPlace.subPlaceInstances[j]].subPlaceTypeId === subInstance.subPlaceTypeId) {
+                        sameCount++;
+                    }
+                }
+                if (sameCount > 1) {
+                    displayName = subType.name + sameCount;
+                }
+
+                let statusNote = '';
+                if (subInstance.searched) {
+                    statusNote = ' <span style="color:#666;">已搜索过</span>';
+                }
+                if (subInstance.locked) {
+                    statusNote = ' <span style="color:#cc3333;">锁着</span>';
+                }
+
+                //如果是“道路”小场所
+                if (subInstance.subPlaceTypeId === 'P0010' && subInstance.destination) {
+
+
+                    let destCity = world.cities[subInstance.destination.cityInstanceId];
+                    let destCityVisited = destCity?.visited || false;
+                    let destCityName = destCityVisited ? destCity.name : '？？？';
+                    if (destCityVisited) {
+                        destCityName += ' <span style="color:#666;">已去过</span>';
+                    }
+                    statusNote += ` → <span style="color:#c4a35a;">${destCityName}（${subInstance.destination.travelHours}小时）</span>`;
+
+                }
+
+                html += `<p><span class="action" onclick="clickSubPlace('${subInstanceId}', '${displayName}')">${displayName}</span>${statusNote}</p>`;
+
+                // 如果当前正在对这个小场所进行开锁操作
+                if (window.unlockTarget === subInstanceId) {
+                    html += `<p>使用钥匙串开锁？ <span class="action" onclick="unlockSubPlace('${subInstanceId}')">[使用]</span> <span class="action" onclick="cancelSubPlaceAction()">[取消]</span></p>`;
+                }
+            }
+
+
+            html += '<p> </p>';
+            html += `<p><span class="action" style="color:#888;" onclick="leaveBigPlace()">【离开】</span></p>`;
+
+            fadeContent('sceneArea', html);
+            updateOverlay();
+        }
+
+        //点击小场所
+        function clickSubPlace(subInstanceId, displayName) {
+            let subInstance = subPlaceInstances[subInstanceId];
+
+            if (subInstance.locked) {
+                if (window.unlockTarget === subInstanceId) {
+                    window.unlockTarget = null;
+                } else {
+                    window.unlockTarget = subInstanceId;
+                }
+                showBigPlace(currentBigPlaceId);
+                return;
+            }
+
+            window.unlockTarget = null;
+            enterSubPlace(subInstanceId, displayName);
+        }
+
+        //开锁小场所
+        function unlockSubPlace(subInstanceId) {
+            let keyIndex = player.inventory.findIndex(item => item.id === 'I0009');
+            if (keyIndex === -1) return;
+
+            subPlaceInstances[subInstanceId].locked = false;
+            player.inventory[keyIndex].qty -= 1;
+            if (player.inventory[keyIndex].qty <= 0) {
+                player.inventory.splice(keyIndex, 1);
+            }
+            window.unlockTarget = null;
+            renderInventoryBar();
+            showBigPlace(currentBigPlaceId);
+        }
+
+        //取消开锁小场所
+        function cancelSubPlaceAction() {
+            window.unlockTarget = null;
+            showBigPlace(currentBigPlaceId);
+        }
+
+        //进入小场所
+        function enterSubPlace(subInstanceId, displayName) {
+            currentSubPlaceId = subInstanceId;
+            let subInstance = subPlaceInstances[subInstanceId];
+            let subType = SUB_PLACE_TYPES[subInstance.subPlaceTypeId];
+
+            renderTimeBar();
+            renderStatusBar();
+            renderInventoryBar();
+
+            let html = `<p>你在${displayName}里。</p>`;
+
+
+            if (!subInstance.searched) {
+                html += `<p><span class="action" onclick="searchPlace('${subInstanceId}', '${displayName}')">【搜索】</span> <span class="action" onclick="toggleSettle('${subInstanceId}')">【安顿】</span></p>`;
+            } else {
+                html += `<p><span style="color:#666;">已搜索过</span> <span class="action" onclick="toggleSettle('${subInstanceId}')">【安顿】</span></p>`;
+            }
+            //如果是“道路”，显示目的地
+
+
+            if (subInstance.subPlaceTypeId === 'P0010' && subInstance.destination) {
+                let destCity = world.cities[subInstance.destination.cityInstanceId];
+                let destCityVisited = destCity?.visited || false;
+                let destCityName = destCityVisited ? destCity.name : '？？？';
+                if (destCityVisited) {
+                    destCityName += ' <span style="color:#666;">已去过</span>';
+                }
+                let travelHours = subInstance.destination.travelHours;
+                html += `<p><span class="action" onclick="travelToCity('${subInstanceId}')">【继续前行 → ${destCityName}（${travelHours}小时）】</span></p>`;
+            }
+
+            html += `<br>`;
+            html += `<p><span class="action" style="color:#888;" onclick="showBigPlace(currentBigPlaceId)">【返回】</span></p>`;
+
+            fadeContent('sceneArea', html);
+            updateOverlay();
+        }
+
+        //搜索【小场所】（小场所实例物资生成在place.js）
+        function searchPlace(subInstanceId, displayName) {
+            let subInstance = subPlaceInstances[subInstanceId];
+            let loot = getLootFromPlace(subInstance.subPlaceTypeId);
+
+            subInstance.searched = true;
+
+            // 背包叠加（不变）
+            for (let item of loot) {
+                let existing = player.inventory.find(i => i.id === item.id);
+                if (existing) {
+                    existing.qty += item.qty;
+                } else {
+                    player.inventory.push({
+                        id: item.id,
+                        name: item.name,
+                        category: item.category,
+                        qty: item.qty
+                    });
+                }
+            }
+
+            player.energy -= 5;
+            // player.fullness -= 3; // 饱腹由 advanceTime 统一扣除
+            advanceTime(0.5);
+
+
+
+
+            renderTimeBar();
+            renderStatusBar();
+            renderInventoryBar();
+            let html = `<p>你仔细搜索了${displayName}。</p>`;
+
+            if (loot.length === 0) {
+                html += '<p>没有找到任何有用的东西。</p>';
+            } else {
+                let lootText = loot.map(item => `<span style="color:#fff;font-weight:bold;">${item.qty}</span><span style="color:#aaa;"> × ${item.name}</span>`).join('、');
+                html += `<p>找到了：${lootText}</p>`;
+            }
+            html += `<p><span class="action" style="color:#888;" onclick="enterSubPlace('${subInstanceId}', '${displayName}')">【继续】</span></p>`;
+            fadeContent('sceneArea', html);
+            updateOverlay();
+        }
+
+        //离开大场所，来到【城市】界面
+        function leaveBigPlace() {
+            let city = world.cities[currentCityId];
+            currentBigPlaceId = null;
+            currentSubPlaceId = null;
+
+
+            renderTimeBar();
+            renderStatusBar();
+            renderInventoryBar();
+            let html = '<p>你来到了外面的街道上。</p>';
+            html += '<p>可以前往：</p>';
+
+            let knownPlaces = city.bigPlaceInstances.filter(bpId => {
+                return bigPlaceInstances[bpId].known;
+            });
+
+            if (knownPlaces.length === 0) {
+                html += '<p>没有发现任何可去的地方。</p>';
+            } else {
+
+
+                for (let bpId of knownPlaces) {
+                    let bp = bigPlaceInstances[bpId];
+                    let bpType = BIG_PLACE_TYPES[bp.bigPlaceTypeId];
+                    let displayName = bpType.name;
+                    if (bp.locked) {
+                        displayName += ' <span style="color:#cc3333;">锁着</span>';
+                    }
+                    //显示“已去过”
+                    if (bp.visited) {
+                        displayName += ' <span style="color:#666;">已去过</span>';
+                    }
+                    html += `<p><span class="action" onclick="clickBigPlace('${bpId}')">${displayName}</span></p>`;
+
+                    if (window.unlockTarget === bpId) {
+                        html += `<p>使用钥匙串开锁？ <span class="action" onclick="unlockBigPlace('${bpId}')">[使用]</span> <span class="action" onclick="cancelBigPlaceAction()">[取消]</span></p>`;
+                    }
+
+                }
+            }
+
+            fadeContent('sceneArea', html);
+            updateOverlay();
+        }
+
+        //城市间旅行
+        function travelToCity(fromSubInstanceId) {
+            let subInstance = subPlaceInstances[fromSubInstanceId];
+            let dest = subInstance.destination;
+            let travelHours = dest.travelHours;
+
+            // 检查体力
+            if (player.energy - travelHours * 5 <= 0) {
+                alert('你的体力不足，踏上这段旅程可能很危险。');
+                return;
+            }
+            // 检查饱腹
+            if (player.fullness - travelHours * 3 <= 0) {
+                alert('你的饱腹不足，踏上这段旅程可能很危险。');
+                return;
+            }
+
+            // 消耗时间和状态
+            player.energy -= travelHours * 5;
+            advanceTime(travelHours);
+
+            // 检查是否已有连接
+            let existingConnection = cityConnections.find(c => c.fromSubInstanceId === fromSubInstanceId);
+
+            let toCityInstanceId, toSubInstanceId;
+
+            if (existingConnection) {
+                //已有链接，走旧的链接
+                toCityInstanceId = existingConnection.toCityInstanceId;
+                toSubInstanceId = existingConnection.toSubInstanceId;
+            } else {
+                // 使用道路生成时已创建的目标城市实例
+                toCityInstanceId = dest.cityInstanceId;
+
+                // 在目标城市中找到通路大场所
+                let newCity = world.cities[toCityInstanceId];
+                let roadBigPlaceId = null;
+                for (let bpId of newCity.bigPlaceInstances) {
+                    if (bigPlaceInstances[bpId].bigPlaceTypeId === 'B0004') {
+                        roadBigPlaceId = bpId;
+                        break;
+                    }
+                }
+
+                // 如果目标城市没有通路（概率问题），强制生成一个
+                if (!roadBigPlaceId) {
+                    instanceCounters.bigPlace++;
+                    roadBigPlaceId = 'BP' + instanceCounters.bigPlace;
+                    bigPlaceInstances[roadBigPlaceId] = {
+                        bigPlaceTypeId: 'B0004',
+                        known: true,
+                        locked: false,
+                        subPlaceInstances: []
+                    };
+                    newCity.bigPlaceInstances.push(roadBigPlaceId);
+                }
+
+                //设置该通路大场所为已知
+                bigPlaceInstances[roadBigPlaceId].known = true;
+
+
+                // 生成通路内部
+                if (bigPlaceInstances[roadBigPlaceId].subPlaceInstances.length === 0) {
+                    generateBigPlace('B0004', toCityInstanceId, roadBigPlaceId);
+                }
+
+                // 在通路中找一个道路作为到达点
+                let roadSubs = bigPlaceInstances[roadBigPlaceId].subPlaceInstances;
+                toSubInstanceId = null;
+                for (let sid of roadSubs) {
+                    if (subPlaceInstances[sid].subPlaceTypeId === 'P0010') {
+                        toSubInstanceId = sid;
+                        break;
+                    }
+                }
+
+                // 记录连接
+                cityConnections.push({
+                    fromCityInstanceId: currentCityId,
+                    fromSubInstanceId: fromSubInstanceId,
+                    toCityInstanceId: toCityInstanceId,
+                    toSubInstanceId: toSubInstanceId,
+                    travelHours: travelHours
+                });
+
+                // 双向连接
+                subPlaceInstances[toSubInstanceId].destination = {
+                    cityTypeId: world.cities[currentCityId].cityTypeId,
+                    cityInstanceId: currentCityId,
+                    travelHours: travelHours
+                };
+                cityConnections.push({
+                    fromCityInstanceId: toCityInstanceId,
+                    fromSubInstanceId: toSubInstanceId,
+                    toCityInstanceId: currentCityId,
+                    toSubInstanceId: fromSubInstanceId,
+                    travelHours: travelHours
+                });
+            }
+
+            // 设置当前位置
+            currentCityId = toCityInstanceId;
+            currentBigPlaceId = null;
+            for (let bpId of Object.keys(bigPlaceInstances)) {
+                if (bigPlaceInstances[bpId].subPlaceInstances.includes(toSubInstanceId)) {
+                    currentBigPlaceId = bpId;
+                    break;
+                }
+            }
+            currentSubPlaceId = toSubInstanceId;
+
+            renderTimeBar();
+            renderStatusBar();
+            renderInventoryBar();
+
+            let destCityName = world.cities[toCityInstanceId].name;
+            let html = `<p>你沿着道路前行了${travelHours}小时，到达了${destCityName}。</p>`;
+            html += `<p><span class="action" style="color:#888;" onclick="enterSubPlace('${toSubInstanceId}', '${SUB_PLACE_TYPES[subPlaceInstances[toSubInstanceId].subPlaceTypeId].name}')">【继续】</span></p>`;
+            fadeContent('sceneArea', html);
+            updateOverlay();
+        }
+
+
+
+
+    </script>
+
+    <style>
+        body {
+            /* background-color: #1a1a1a; */
+            background-color: #444444;
+            color: #d0d0d0;
+            font-family: sans-serif;
+            padding: 20px;
+            max-width: 400px;
+            margin: 0 auto;
+            line-height: 1.8;
+            font-size: 16px;
+        }
+
+        .action {
+            color: #c4a35a;
+            text-decoration: underline;
+            cursor: pointer;
+        }
+
+        hr {
+            border: 1px solid #333;
+            margin: 16px 0;
+        }
+
+        #overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            pointer-events: none;
+            z-index: 999;
+        }
+
+        #timeBar {
+            background: #333;
+            padding: 6px 8px;
+            margin-bottom: 4px;
+            border-radius: 4px;
+            font-size: 14px;
+            overflow: hidden;
+        }
+
+        #statusBar {
+            background: #333;
+            padding: 6px 8px;
+            margin-bottom: 4px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        #inventoryBar {
+            background: #333;
+            padding: 6px 8px;
+            margin-bottom: 4px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+
+        .stat-value {
+            transition: opacity 0.3s;
+        }
+    </style>
+</body>
+
+</html>
