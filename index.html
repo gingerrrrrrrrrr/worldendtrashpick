@@ -97,6 +97,9 @@
         //安顿目标（小场所）
         window.settleTarget = null;
 
+        //死亡界面
+        window.gameOver = false;
+
 
 
 
@@ -113,6 +116,25 @@
 
             player.fullness = Math.max(0, player.fullness - hours * 3);
             player.spirit = Math.max(0, player.spirit - hours * 2);
+            checkGameOver();
+            // console.log('饱腹:', player.fullness, '体力:', player.energy, '精神:', player.spirit);
+
+        }
+
+        function checkGameOver() {
+            if (player.fullness <= 0 || player.energy <= 0 || player.spirit <= 0) {
+                window.gameOver = true;
+                let reason = '';
+                if (player.fullness <= 0) reason = '你因饥饿倒下，再也没有起来。';
+                else if (player.energy <= 0) reason = '你精疲力竭，倒在了废墟之中。';
+                else if (player.spirit <= 0) reason = '你的精神崩溃了，失去了活下去的勇气。';
+
+                let html = `<p style="color:#cc3333;">${reason}</p>`;
+                html += '<p style="color:#888;">游戏结束</p>';
+                html += `<p><span class="action" onclick="newGame()">【重新开始】</span> <span class="action" onclick="loadGame()">【读档】</span></p>`;
+                document.getElementById('sceneArea').innerHTML = html;
+                fadeContent('sceneArea', html);
+            }
         }
 
         //夜幕蒙版
@@ -123,13 +145,13 @@
 
             if (hour >= seasonConfig.duskEnd || hour < seasonConfig.dawnStart) {
                 // 黑：20:00 - 4:00
-                opacity = 0.8;
+                opacity = 0.6;
             } else if (hour >= seasonConfig.duskStart && hour < seasonConfig.duskEnd) {
                 // 傍晚过渡：18:00 - 20:00，从0到1
-                opacity = 0.8 * (hour - seasonConfig.duskStart) / (seasonConfig.duskEnd - seasonConfig.duskStart);
+                opacity = 0.6 * (hour - seasonConfig.duskStart) / (seasonConfig.duskEnd - seasonConfig.duskStart);
             } else if (hour >= seasonConfig.dawnStart && hour < seasonConfig.dawnEnd) {
                 // 清晨过渡：4:00 - 6:00，从1到0
-                opacity = 0.8 * (1 - (hour - seasonConfig.dawnStart) / (seasonConfig.dawnEnd - seasonConfig.dawnStart));
+                opacity = 0.6 * (1 - (hour - seasonConfig.dawnStart) / (seasonConfig.dawnEnd - seasonConfig.dawnStart));
             } else {
                 // 白天：6:00 - 18:00
                 opacity = 0;
@@ -140,6 +162,7 @@
 
         //渐变效果
         function fadeContent(elementId, newInnerHTML) {
+            if (window.gameOver && newInnerHTML && !newInnerHTML.includes('游戏结束')) return;
             let el = document.getElementById(elementId);
             if (newInnerHTML !== undefined) {
                 el.innerHTML = newInnerHTML;
@@ -148,6 +171,7 @@
             setTimeout(() => {
                 el.style.opacity = '1';
             }, 100);
+            saveGame();
         }
 
         //状态栏显示，背包，时间，状态
@@ -192,6 +216,16 @@
             let spirit = Math.round(player.spirit);
             let html = `饱腹：<span class="stat-value" id="stat-fullness" style="color:${getStatusColor(fullness)}">${fullness}</span> | 体力：<span class="stat-value" id="stat-energy" style="color:${getStatusColor(energy)}">${energy}</span> | 精神：<span class="stat-value" id="stat-spirit" style="color:${getStatusColor(spirit)}">${spirit}</span>`;
 
+            html += `<span style="float:right;">`;
+            if (currentSubPlaceId) {
+                html += `<span class="action" onclick="toggleSettle('${currentSubPlaceId}')">安顿</span> `;
+            }
+            html += `<span class="action" onclick="toggleMenu()">菜单</span>`;
+            html += `</span>`;
+
+            html += `<div style="clear:both;"></div>`;
+
+
             document.getElementById('statusBar').innerHTML = html;
 
             // 检查哪些值变了，触发淡入
@@ -212,7 +246,6 @@
 
             window._lastStatusValues = { fullness, energy, spirit };
         }
-
 
         function renderInventoryBar() {
             let html = `<span style="cursor:pointer;" onclick="toggleInventory()">背包 ${window.inventoryCollapsed ? '[展开]' : '[折叠]'}</span>`;
@@ -244,6 +277,83 @@
             if (value > 25) return '#ccaa33';        // 黄色
             return '#cc3333';                         // 红色
         }
+
+        //主菜单
+        function toggleMenu() {
+            let menuHtml = '<p>菜单</p>';
+            menuHtml += `<p><span class="action" onclick="newGame()">【重新开始】</span></p>`;
+            menuHtml += `<p><span class="action" style="color:#888;" onclick="closeMenu()">【关闭】</span></p>`;
+            document.getElementById('inventoryBar').innerHTML = menuHtml;
+        }
+
+        //关闭主菜单
+        function closeMenu() {
+            renderInventoryBar();
+        }
+
+        //开新游戏
+        function newGame() {
+            localStorage.removeItem('wasteland_save');
+            location.reload();
+            window.gameOver = false;
+        }
+
+        //存档
+        function saveGame() {
+            if (player.fullness <= 0 || player.energy <= 0 || player.spirit <= 0) return;
+            let saveData = {
+                player: player,
+                gameTime: gameTime,
+                world: world,
+                bigPlaceInstances: bigPlaceInstances,
+                subPlaceInstances: subPlaceInstances,
+                instanceCounters: instanceCounters,
+                currentCityId: currentCityId,
+                currentBigPlaceId: currentBigPlaceId,
+                currentSubPlaceId: currentSubPlaceId,
+                cityConnections: cityConnections
+            };
+            localStorage.setItem('wasteland_save', JSON.stringify(saveData));
+        }
+
+        //读档
+        function loadGame() {
+
+            let saveStr = localStorage.getItem('wasteland_save');
+            if (!saveStr) return false;
+            let saveData = JSON.parse(saveStr);
+            player = saveData.player;
+            gameTime = saveData.gameTime;
+            world = saveData.world;
+            bigPlaceInstances = saveData.bigPlaceInstances;
+            subPlaceInstances = saveData.subPlaceInstances;
+            instanceCounters = saveData.instanceCounters;
+            currentCityId = saveData.currentCityId;
+            currentBigPlaceId = saveData.currentBigPlaceId;
+            currentSubPlaceId = saveData.currentSubPlaceId;
+            cityConnections = saveData.cityConnections;
+            window.gameOver = false;
+            updateOverlay();
+            renderTimeBar();
+            renderStatusBar();
+            renderInventoryBar();
+            if (currentSubPlaceId) {
+                let subType = SUB_PLACE_TYPES[subPlaceInstances[currentSubPlaceId].subPlaceTypeId];
+                enterSubPlace(currentSubPlaceId, subType.name);
+            } else if (currentBigPlaceId) {
+                showBigPlace(currentBigPlaceId);
+            } else {
+                leaveBigPlace();
+            }
+            return true;
+
+
+
+        }
+
+
+
+
 
         //背包折叠
         function toggleInventory() {
@@ -333,8 +443,8 @@
         //安顿窗口
         function toggleSettle(subInstanceId) {
             // 消耗时间和体力
-            player.energy -= 5;
-            advanceTime(0.5);
+            // player.energy -= 5;
+            // advanceTime(0.5);
             renderTimeBar();
             renderStatusBar();
 
@@ -487,7 +597,7 @@
                 resultHtml += `<p>${msgParts.join('，')}</p>`;
             }
             resultHtml += `<p><span class="action" style="color:#888;" onclick="showSettle(window.settleTarget)">[返回]</span></p>`;
-            fadeContent('sceneArea', html);
+            fadeContent('sceneArea', resultHtml);
             updateOverlay();
         }
 
@@ -863,10 +973,14 @@
 
 
             if (!subInstance.searched) {
-                html += `<p><span class="action" onclick="searchPlace('${subInstanceId}', '${displayName}')">【搜索】</span> <span class="action" onclick="toggleSettle('${subInstanceId}')">【安顿】</span></p>`;
+                html += `<p><span class="action" onclick="searchPlace('${subInstanceId}', '${displayName}')">【搜索】</span></p>`;
             } else {
-                html += `<p><span style="color:#666;">已搜索过</span> <span class="action" onclick="toggleSettle('${subInstanceId}')">【安顿】</span></p>`;
+                html += `<p><span style="color:#666;">已搜索过</span></p>`;
             }
+
+
+
+
             //如果是“道路”，显示目的地
 
 
@@ -985,14 +1099,17 @@
             let dest = subInstance.destination;
             let travelHours = dest.travelHours;
 
-            // 检查体力
+
             if (player.energy - travelHours * 5 <= 0) {
-                alert('你的体力不足，踏上这段旅程可能很危险。');
+                let html = '<p>你的体力不足，踏上这段旅程可能很危险。</p>';
+                html += `<p><span class="action" style="color:#888;" onclick="enterSubPlace('${fromSubInstanceId}', '${SUB_PLACE_TYPES[subPlaceInstances[fromSubInstanceId].subPlaceTypeId].name}')">【返回】</span></p>`;
+                fadeContent('sceneArea', html);
                 return;
             }
-            // 检查饱腹
             if (player.fullness - travelHours * 3 <= 0) {
-                alert('你的饱腹不足，踏上这段旅程可能很危险。');
+                let html = '<p>你的饱腹不足，踏上这段旅程可能很危险。</p>';
+                html += `<p><span class="action" style="color:#888;" onclick="enterSubPlace('${fromSubInstanceId}', '${SUB_PLACE_TYPES[subPlaceInstances[fromSubInstanceId].subPlaceTypeId].name}')">【返回】</span></p>`;
+                fadeContent('sceneArea', html);
                 return;
             }
 
@@ -1101,8 +1218,7 @@
             updateOverlay();
         }
 
-
-
+        loadGame();
 
     </script>
 
